@@ -76,8 +76,10 @@ void loop() {
       reset = checkAutoResetConditions(fs.fuelUsedGals);
       if (reset) { resetFuel(); }
     }
-    
-    Serial.print("galsUsed=");
+
+    Serial.print("pulses=");
+    Serial.print(fs.fuelPulses);
+    Serial.print(",galsUsed=");
     Serial.print(fs.fuelUsedGals);
     Serial.print(",fuelRemaining=");
     Serial.print(fs.fuelRemainingGals);
@@ -88,12 +90,12 @@ void loop() {
     Serial.print(",lapsRem=");
     Serial.println(fs.lapsRemaining);
 
-    fs.fuelPulses = 12345678;
-    fs.fuelUsedGals = 10.55123;
-    fs.fuelConsumptionGalMin = 0.1553456;
-    fs.fuelRemainingGals = 8.2134213;
-    fs.fuelRemainingMins = 33.333;
-    fs.lapsRemaining = 21;
+    // fs.fuelPulses = 12345678;
+    // fs.fuelUsedGals = 10.55123;
+    // fs.fuelConsumptionGalMin = 0.1553456;
+    // fs.fuelRemainingGals = 8.2134213;
+    // fs.fuelRemainingMins = 33.333;
+    // fs.lapsRemaining = 21;
     transmitFuelData(fs);
 
     lastFuelStatus = millis();

@@ -29,7 +29,6 @@ byte lapTimePos = 0;
 
 void startFlowMeter() {
   float savedGals = loadFuelCons();
-  resetFuel();
   fuelPulses = savedGals * K;
   sensorPin = getFlowPin();
   pinMode(sensorPin, INPUT_PULLUP);
