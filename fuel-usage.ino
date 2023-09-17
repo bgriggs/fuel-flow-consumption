@@ -1,9 +1,14 @@
 #include <mcp_can.h>
 #include <SPI.h>
 
+#define K 68000
+#define SAVE_FREQMS 30000  // EEPROM limited to 100000 writes so limit this frequency
+#define EEPROM_ADDR 0
+
 const int SPI_CS_PIN = 17;  // CANBed
 MCP_CAN CAN(SPI_CS_PIN);    // Set CS pin
 unsigned long lastFuelStatus = 0;
+volatile unsigned long fuelPulses;
 
 typedef struct {
   unsigned long fuelPulses;
@@ -11,6 +16,7 @@ typedef struct {
   float fuelRemainingGals;
   float fuelConsumptionGalMin;
   float fuelRemainingMins;
+  float fuelConsumptionGalLap;
   int lapsRemaining;
 } FuelStatus;
 
@@ -56,7 +62,7 @@ void setup() {
   Serial.println("CAN BUS OK!");
 }
 
-void loop() {
+void loop() {  
   bool reset = 0;
   static unsigned long lastRest = 0;
   recieveCanParams(&reset);
@@ -77,18 +83,7 @@ void loop() {
       if (reset) { resetFuel(); }
     }
 
-    Serial.print("pulses=");
-    Serial.print(fs.fuelPulses);
-    Serial.print(",galsUsed=");
-    Serial.print(fs.fuelUsedGals);
-    Serial.print(",fuelRemaining=");
-    Serial.print(fs.fuelRemainingGals);
-    Serial.print(",consGalMin=");
-    Serial.print(fs.fuelConsumptionGalMin);
-    Serial.print(",remMins=");
-    Serial.print(fs.fuelRemainingMins);
-    Serial.print(",lapsRem=");
-    Serial.println(fs.lapsRemaining);
+    printDebug(fs);
 
     // fs.fuelPulses = 12345678;
     // fs.fuelUsedGals = 10.55123;
@@ -101,6 +96,21 @@ void loop() {
     lastFuelStatus = millis();
   }
   delay(50);
+}
+
+void printDebug(FuelStatus fs){
+    Serial.print("pulses=");
+    Serial.print(fs.fuelPulses);
+    Serial.print(",galsUsed=");
+    Serial.print(fs.fuelUsedGals);
+    Serial.print(",fuelRemaining=");
+    Serial.print(fs.fuelRemainingGals);
+    Serial.print(",consGalMin=");
+    Serial.print(fs.fuelConsumptionGalMin);
+    Serial.print(",remMins=");
+    Serial.print(fs.fuelRemainingMins);
+    Serial.print(",lapsRem=");
+    Serial.println(fs.lapsRemaining);
 }
 
 void transmitFuelData(FuelStatus fs) {
@@ -131,7 +141,9 @@ void transmitFuelData(FuelStatus fs) {
   uint16_t lr = (uint16_t)fs.lapsRemaining;
   fuelData2[4] = (unsigned char)((lr & 0xFF00) >> 8);
   fuelData2[5] = (unsigned char)((lr & 0x00FF));
-
+  uint16_t gl = (uint16_t)(fs.fuelConsumptionGalLap * 10000);
+  fuelData2[6] = (unsigned char)((gl & 0xFF00) >> 8);
+  fuelData2[7] = (unsigned char)((gl & 0x00FF));
   // for (int i = 0; i < 8; i++) {
   //   Serial.print(fuelData1[i], HEX);
   //   Serial.print(",");

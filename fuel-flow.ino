@@ -1,9 +1,5 @@
 //#define FLOWSENSORPIN 0  // RX
-#define K 68000
-#define SAVE_FREQMS 30000  // EEPROM limited to 100000 writes so limit this frequency
-#define EEPROM_ADDR 0
 
-volatile unsigned long fuelPulses;
 volatile uint8_t lastflowpinstate;
 
 unsigned long lastFuelConsSave = 0;
@@ -51,12 +47,10 @@ FuelStatus getFuelStatus(float fuelCapacityGals, unsigned long lapTimeMs) {
   unsigned long now = millis();
   if ((now - lastFuelReading) >= HIST_FREQMS) {
     // Move history window
-    if (pulseHistoryPos >= MAX_HISTORY - 1) {
+    if (pulseHistoryPos >= MAX_HISTORY) {
       for (int i = 0; i < MAX_HISTORY - 1; i++) {
         pulseHistory[i] = pulseHistory[i + 1];
       }
-      //memmove(&pulseHistory[0], &pulseHistory[1], sizeof(pulseHistory[0]) * (MAX_HISTORY - 1));
-      //memset(&pulseHistory[MAX_HISTORY - 1], 0, sizeof(pulseHistory[0]));
       pulseHistoryPos = MAX_HISTORY - 1;
     }
 
@@ -70,8 +64,6 @@ FuelStatus getFuelStatus(float fuelCapacityGals, unsigned long lapTimeMs) {
 
   // Move laps window
   if (lapTimePos >= MAX_LAPS) {
-    // memmove(&lapTimes, &lapTimes[1], sizeof(lapTimes[0]) * (MAX_LAPS - 1));
-    // memset(&lapTimes[MAX_LAPS - 1], 0, sizeof(lapTimes[0]));
     for (int i = 0; i < MAX_LAPS - 1; i++) {
       lapTimes[i] = lapTimes[i + 1];
     }
@@ -96,10 +88,12 @@ FuelStatus getFuelStatus(float fuelCapacityGals, unsigned long lapTimeMs) {
       s.fuelRemainingGals = 0;
   }
 
-  // Calculate consumption when there is sufficent history
+  // Calculate consumption when there is sufficient history
   if (pulseHistoryPos == MAX_HISTORY) {
     unsigned long durationms = pulseHistory[pulseHistoryPos - 1].time - pulseHistory[0].time;
     unsigned long usage = pulseHistory[pulseHistoryPos - 1].pulses - pulseHistory[0].pulses;
+    Serial.print("durationms=");
+    Serial.println(durationms);
     float usedGals = usage / (float)K;
     float usedGalSec = usedGals / ((float)durationms / 1000.0);
     s.fuelConsumptionGalMin = usedGalSec * 60.0;
@@ -125,6 +119,7 @@ FuelStatus getFuelStatus(float fuelCapacityGals, unsigned long lapTimeMs) {
     if (count > 0) {
       float avgLapTimeMins = (totalLapTime / (float)count) / 60.0 / 1000.0;
       s.lapsRemaining = (int)(s.fuelRemainingMins / avgLapTimeMins);
+      s.fuelConsumptionGalLap = s.fuelConsumptionGalMin * avgLapTimeMins;
       if (s.lapsRemaining < 0)
         s.lapsRemaining = 0;
     }
