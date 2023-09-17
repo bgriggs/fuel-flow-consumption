@@ -92,8 +92,6 @@ FuelStatus getFuelStatus(float fuelCapacityGals, unsigned long lapTimeMs) {
   if (pulseHistoryPos == MAX_HISTORY) {
     unsigned long durationms = pulseHistory[pulseHistoryPos - 1].time - pulseHistory[0].time;
     unsigned long usage = pulseHistory[pulseHistoryPos - 1].pulses - pulseHistory[0].pulses;
-    Serial.print("durationms=");
-    Serial.println(durationms);
     float usedGals = usage / (float)K;
     float usedGalSec = usedGals / ((float)durationms / 1000.0);
     s.fuelConsumptionGalMin = usedGalSec * 60.0;
