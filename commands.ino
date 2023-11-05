@@ -42,7 +42,23 @@ void recieveSerial() {
       } else if (serialrx.startsWith("reset")) {
         Serial.print("Reseting...");
         resetFuel();
+      } else if (serialrx.startsWith("getmetric")) {
+        Serial.print("MetricUnits=");
+        Serial.println(getMetric());
+      } else if (serialrx.startsWith("setmetric")) {
+        serialrx.remove(0, 9);
+        long sp = serialrx.toInt();
+        if (sp >= 0) {
+          setMetric(sp);
+          Serial.print("MetricUnits=");
+          Serial.println(getMetric());
+          Serial.println("Restart to apply changes.");
+        } else {
+          Serial.print("Invalid metric units: ");
+          Serial.println(serialrx);
+        }
       }
+
     }
   }
 }
@@ -58,4 +74,10 @@ void setFlowPin(uint8_t pin) {
 }
 uint8_t getFlowPin() {
   return EEPROM.read(3);
+}
+void setMetric(uint8_t isMetric){
+  EEPROM.write(4, isMetric);
+}
+uint8_t getMetric() {
+  return EEPROM.read(4);
 }
