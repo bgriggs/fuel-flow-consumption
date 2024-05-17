@@ -1,0 +1,17 @@
+**/.vs
+/TestResults
+**/obj
+**/bin
+
+**/.vscode
+
+/.idea
+*.DotSettings.user
+/.teamcity/**/*.iml
+/.teamcity/.idea
+/packages
+/tmp.log
+ca.crt
+**/client.crt
+**/client.pfx
+**/.cr
