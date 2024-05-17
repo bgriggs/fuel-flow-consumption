@@ -1,10 +1,10 @@
 #include <mcp_can.h>
 #include <SPI.h>
 
-#define K 68000
 #define SAVE_FREQMS 30000  // EEPROM limited to 100000 writes so limit this frequency
 #define EEPROM_ADDR 0
 
+uint32_t K = 68000;
 const int SPI_CS_PIN = 17;  // CANBed
 MCP_CAN CAN(SPI_CS_PIN);    // Set CS pin
 unsigned long lastFuelStatus = 0;
