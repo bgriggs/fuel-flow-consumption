@@ -9,6 +9,9 @@ const int SPI_CS_PIN = 17;  // CANBed
 MCP_CAN CAN(SPI_CS_PIN);    // Set CS pin
 unsigned long lastFuelStatus = 0;
 volatile unsigned long fuelPulses;
+const float fuelResetThresholdGals = 4.0;
+unsigned long fuelFullResetThresholdStarted = 0;
+const uint32_t fuelFullResetThresholdMs = 10000;
 
 typedef struct {
   unsigned long fuelPulses;
@@ -112,7 +115,7 @@ void loop() {
   delay(50);
 }
 
-void printDebug(FuelStatus fs){
+void printDebug(FuelStatus fs) {
     Serial.print("pulses=");
     Serial.print(fs.fuelPulses);
     Serial.print(",galsUsed=");
@@ -253,7 +256,19 @@ void recieveCanParams(bool* reset) {
 }
 
 bool checkAutoResetConditions(float fuelUsedGals) {
-  return params.fuelFull && fuelUsedGals > 4.0 && params.speedMph < 3.0;
+  if (params.fuelFull && fuelFullResetThresholdStarted == 0) {
+    fuelFullResetThresholdStarted = millis();
+  }
+  else { // Fuel light goes off, reset the count
+    fuelFullResetThresholdStarted = 0;
+  }
+
+  unsigned long fuelFullOnForMs = millis() - fuelFullResetThresholdStarted;
+  
+  // Fuel is full and has been on constantly beyond the threshold. This avoids fuel sloshing on the sensor when coming to a stop, such as during a red.
+  return params.fuelFull && fuelFullOnForMs > fuelFullResetThresholdMs && 
+    fuelUsedGals > fuelResetThresholdGals && // Fuel used must be passed a reasonable amout to make sense for a pit stop refuel
+    params.speedMph < 3.0;
 }
 
 // Gals to liters

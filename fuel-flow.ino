@@ -41,6 +41,7 @@ void resetFuel() {
   fuelPulses = 0;
   pulseHistoryPos = 0;
   lapTimePos = 0;
+  fuelFullResetThresholdStarted = 0;
   saveFuelCons(0.0);
 }
 
