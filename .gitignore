@@ -19,3 +19,6 @@ ca.crt
 # Build output
 /build-avr
 /test/build
+
+# PlatformIO
+/.pio

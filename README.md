@@ -253,17 +253,41 @@ a different compiler:
 make CXX=clang++
 ```
 
-## Firmware
-Open the sketch in the Arduino IDE and build for the CANBed Elite
-(ATmega32U4). Requires the
-[Longan Labs MCP2515 CAN library](https://github.com/Longan-Labs/Arduino_CAN_BUS_MCP2515).
+### Arduino IDE
+Open the sketch and build for the CANBed Elite, selecting **Arduino Leonardo**
+as the board - it is an ATmega32U4 at 16 MHz with the same bootloader.
 
-To check that it still compiles without opening the IDE:
+Requires Longan Labs' MCP2515 library, the release that provides `mcp_can.h`.
+Install "Longan Labs Arduino CAN Bus Library for MCP2515" through the Library
+Manager. Note that the current upstream repository has renamed that header to
+`mcp_canbus.h`, so a fresh clone from GitHub will not satisfy the include.
+
+### PlatformIO
+`platformio.ini` builds the same sources:
+
+```
+pio run                build
+pio run -t upload      build and flash
+pio device monitor     serial console
+```
+
+PlatformIO does not care that no `.ino` matches the folder name, so it opens
+this directory without complaint. Two things in that file are load-bearing:
+`src_dir` is set to the repository root, because `src/` here holds the pure
+C++ core rather than the sketch and PlatformIO would otherwise compile the
+core and never find `setup()`; and the CAN library is taken from the Arduino
+sketchbook via `lib_extra_dirs` rather than fetched, for the header-name
+reason above.
+
+If PlatformIO cannot find the board when uploading, set `upload_port` - the
+port number changes between the running sketch and the bootloader.
+
+### Compile check without either IDE
 
 ```
 bash tools/avr-build.sh
 ```
 
-This reproduces the IDE's build against the installed AVR toolchain and reports
-flash and RAM usage. Set `ARDUINO15` and `SKETCHBOOK` if your Arduino install
-is not in the default location.
+This drives the Arduino AVR toolchain directly and reports flash and RAM
+usage. Set `ARDUINO15` and `SKETCHBOOK` if your Arduino install is not in the
+default location.
