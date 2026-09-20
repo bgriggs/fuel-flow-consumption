@@ -15,3 +15,7 @@ ca.crt
 **/client.crt
 **/client.pfx
 **/.cr
+
+# Build output
+/build-avr
+/test/build

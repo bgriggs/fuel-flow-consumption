@@ -1,0 +1,6 @@
+# The host test Makefile and the AVR build script are run under WSL, Linux or
+# macOS. Git's autocrlf would check them out with CRLF endings on Windows,
+# which breaks make recipes and leaves stray carriage returns in shell
+# commands, so pin them to LF.
+*.sh text eol=lf
+Makefile text eol=lf
