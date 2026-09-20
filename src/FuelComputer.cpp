@@ -8,6 +8,7 @@ FuelComputer::FuelComputer(uint32_t k)
     sampleCount_(0),
     lastSampleMs_(0),
     haveSampled_(false),
+    peakPulsesPerSec_(0),
     lapHead_(0),
     lapCount_(0),
     lastLapMs_(0) {
@@ -46,6 +47,32 @@ bool FuelComputer::recordLap(uint32_t lapMs) {
 }
 
 void FuelComputer::pushSample(uint32_t nowMs, uint32_t pulses) {
+  // Track the fastest the transducer has actually been driven, so the capture
+  // method can be judged against a measurement rather than an estimate.
+  if (sampleCount_ > 0) {
+    uint8_t prev =
+        (uint8_t)((sampleHead_ + HISTORY_SAMPLES - 1) % HISTORY_SAMPLES);
+    uint32_t dtMs = elapsed(nowMs, samples_[prev].timeMs);
+    // A counter that went backwards means a reset, which says nothing about
+    // the pulse rate. Without this the subtraction wraps to about 2^32 and
+    // the peak latches at its maximum.
+    if (dtMs > 0 && pulses >= samples_[prev].pulses) {
+      uint32_t delta = pulses - samples_[prev].pulses;
+      uint32_t rate;
+      if (delta <= MAX_RATE_SAMPLE_PULSES) {
+        rate = (uint32_t)((delta * 1000UL) / dtMs);
+      } else {
+        // Reordered to stay inside a uint32. Loses sub-kHz precision, which
+        // does not matter at a rate this far beyond anything real.
+        rate = (uint32_t)((delta / dtMs) * 1000UL);
+      }
+      if (rate > 65535UL) rate = 65535UL;
+      if ((uint16_t)rate > peakPulsesPerSec_) {
+        peakPulsesPerSec_ = (uint16_t)rate;
+      }
+    }
+  }
+
   samples_[sampleHead_].timeMs = nowMs;
   samples_[sampleHead_].pulses = pulses;
   sampleHead_ = (uint8_t)((sampleHead_ + 1) % HISTORY_SAMPLES);

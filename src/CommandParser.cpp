@@ -87,6 +87,8 @@ Command parseCommand(const char* line) {
     { "reset", CMD_RESET },
     { "getcapture", CMD_GET_CAPTURE },
     { "setcapture", CMD_SET_CAPTURE },
+    { "getpulseguard", CMD_GET_PULSE_GUARD },
+    { "setpulseguard", CMD_SET_PULSE_GUARD },
     { "debug", CMD_SET_DEBUG }
   };
   const uint8_t verbCount = (uint8_t)(sizeof(verbs) / sizeof(verbs[0]));

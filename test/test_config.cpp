@@ -51,22 +51,146 @@ TEST(Config, erased_eeprom_yields_safe_defaults) {
   CHECK_NEAR(s.fuelUsedGallons(), 0.0f, 1e-6);
 }
 
-// Existing units were calibrated against the timer-polled counter, so an
-// upgrade must not silently move them onto the interrupt counter.
-TEST(Config, capture_mode_defaults_to_the_legacy_counter) {
+// Polling tops out at 25.9 GPH against a transducer rated to 70, so hardware
+// interrupt counting is the default and polling is only a fallback.
+TEST(Config, capture_mode_defaults_to_the_interrupt_counter) {
   FakeEeprom e;
   Settings s(e);
-  CHECK_EQ(s.captureMode(), CAPTURE_TIMER_POLL);
+  CHECK_EQ(s.captureMode(), CAPTURE_PIN_INTERRUPT);
   CHECK(isValidCaptureMode(CAPTURE_TIMER_POLL));
   CHECK(isValidCaptureMode(CAPTURE_PIN_INTERRUPT));
   CHECK(!isValidCaptureMode(2));
   CHECK(!isValidCaptureMode(255));
   CHECK_EQ(validateCaptureMode(255), DEFAULT_CAPTURE_MODE);
 
-  s.setCaptureMode(CAPTURE_PIN_INTERRUPT);
-  CHECK_EQ(s.captureMode(), CAPTURE_PIN_INTERRUPT);
+  s.setCaptureMode(CAPTURE_TIMER_POLL);
+  CHECK_EQ(s.captureMode(), CAPTURE_TIMER_POLL);
   s.setCaptureMode(99);
   CHECK_EQ(s.captureMode(), DEFAULT_CAPTURE_MODE);
+}
+
+// A K dialed down to hide a counter that was losing pulses will over-read
+// once every pulse is counted, so the firmware says so at boot.
+TEST(Config, recognizes_a_k_far_from_the_transducer_nominal) {
+  CHECK(isNearNominalK(DEFAULT_K));
+  CHECK(isNearNominalK(63000));   // within 10%, plausible installation effect
+  CHECK(!isNearNominalK(45000));  // compensating for ~34% lost pulses
+  CHECK(!isNearNominalK(0));
+  CHECK(!isNearNominalK(MIN_K));
+  CHECK(!isNearNominalK(MAX_K));
+}
+
+// Pin the tolerance at its exact edges. Without these the band could be
+// widened or narrowed without any test noticing.
+TEST(Config, k_tolerance_band_is_exact) {
+  CHECK_EQ(K_TOLERANCE_PERCENT, 10u);
+  CHECK(isNearNominalK(61200));   // DEFAULT_K - 10%
+  CHECK(!isNearNominalK(61199));
+  CHECK(isNearNominalK(74800));   // DEFAULT_K + 10%
+  CHECK(!isNearNominalK(74801));
+}
+
+// The holdoff is the only noise control in interrupt capture, so its bounds
+// and its effect on the countable flow rate need pinning.
+TEST(Config, pulse_guard_is_range_checked) {
+  CHECK(isValidPulseGuard(0));                        // holdoff disabled
+  CHECK(isValidPulseGuard(DEFAULT_PULSE_GUARD_UNITS));
+  CHECK(isValidPulseGuard(MAX_PULSE_GUARD_UNITS));
+  CHECK(!isValidPulseGuard(MAX_PULSE_GUARD_UNITS + 1));
+  CHECK(!isValidPulseGuard(255));                     // erased EEPROM
+  CHECK_EQ(validatePulseGuard(255), DEFAULT_PULSE_GUARD_UNITS);
+  CHECK_EQ(validatePulseGuard(0), (uint8_t)0);
+}
+
+TEST(Config, erased_eeprom_gives_the_default_pulse_guard) {
+  FakeEeprom e;
+  Settings s(e);
+  CHECK_EQ(s.pulseGuardUnits(), DEFAULT_PULSE_GUARD_UNITS);
+  CHECK_EQ(s.pulseGuardUs(), (uint16_t)400);
+  s.setPulseGuardUnits(80);
+  CHECK_EQ(s.pulseGuardUs(), (uint16_t)800);
+}
+
+// Written straight into the cell, bypassing the setter, so this pins the
+// coercion done on read rather than the coercion done on write.
+TEST(Config, an_out_of_range_stored_guard_is_coerced_on_read) {
+  FakeEeprom e;
+  Settings s(e);
+  e.poke(ADDR_PULSE_GUARD, 255);
+  CHECK_EQ(s.pulseGuardUnits(), DEFAULT_PULSE_GUARD_UNITS);
+  e.poke(ADDR_PULSE_GUARD, (uint8_t)(MAX_PULSE_GUARD_UNITS + 1));
+  CHECK_EQ(s.pulseGuardUnits(), DEFAULT_PULSE_GUARD_UNITS);
+  e.poke(ADDR_PULSE_GUARD, 0);
+  CHECK_EQ(s.pulseGuardUnits(), (uint8_t)0);  // 0 is a legitimate setting
+}
+
+// The default has to pass an FT60 at its rated 70 GPH (1322 Hz) with margin,
+// while still rejecting everything meaningfully faster.
+TEST(Config, default_pulse_guard_passes_the_transducer_at_full_rate) {
+  uint16_t ceiling = countableRateHz(DEFAULT_PULSE_GUARD_UNITS *
+                                     PULSE_GUARD_UNIT_US);
+  CHECK_EQ(ceiling, (uint16_t)2500);
+  // Derive the FT60 rate rather than hard-coding it, so the margin is still
+  // checked if the nominal K ever changes.
+  const uint32_t ft60MaxHz = DEFAULT_K * 70UL / 3600UL;  // 70 GPH
+  CHECK_EQ(ft60MaxHz, 1322UL);
+  // The margin has to be real, not marginal.
+  CHECK((uint32_t)ceiling > ft60MaxHz * 3UL / 2UL);
+}
+
+TEST(Config, countable_rate_reports_no_ceiling_when_the_guard_is_off) {
+  CHECK_EQ(countableRateHz(0), (uint16_t)0);
+  CHECK_EQ(countableRateHz(1000), (uint16_t)1000);
+  CHECK_EQ(countableRateHz(2000), (uint16_t)500);
+}
+
+// The smallest settable guard implies 100000 Hz, which does not fit a uint16
+// and wrapped to 34464 before it was clamped, so status reported a countable
+// ceiling far below the truth.
+TEST(Config, countable_rate_saturates_instead_of_wrapping) {
+  CHECK_EQ(countableRateHz(10), (uint16_t)65535);
+  CHECK_EQ(countableRateHz(16), (uint16_t)62500);
+  CHECK_EQ(countableRateHz(20), (uint16_t)50000);
+  CHECK(countableRateHz(10) >= countableRateHz(20));
+}
+
+// The recalibration advice has to stop once a K has been chosen deliberately,
+// or it nags forever, including at someone who has just recalibrated
+// correctly, since a right answer often lands outside the FT60 band.
+TEST(Config, k_acknowledgement_is_sticky_and_starts_clear) {
+  FakeEeprom e;
+  Settings s(e);
+  CHECK(!s.kAcknowledged());  // erased EEPROM
+  s.setKAcknowledged();
+  CHECK(s.kAcknowledged());
+  s.setKAcknowledged();
+  CHECK(s.kAcknowledged());
+}
+
+// The worked example in the README lands outside the band, so it must be
+// possible to stop the advice after following it.
+TEST(Config, a_correctly_recalibrated_k_can_be_acknowledged) {
+  FakeEeprom e;
+  Settings s(e);
+  const uint32_t recalibrated = 58286;  // 68000 x 18/21, from the README
+  CHECK(!isNearNominalK(recalibrated));
+  CHECK(!s.kAcknowledged());
+  s.setK(recalibrated);
+  s.setKAcknowledged();
+  CHECK(s.kAcknowledged());
+  CHECK_EQ(s.k(), recalibrated);
+}
+
+// Distinguishing an upgrade from a deliberate choice is what stops the
+// recalibration warning nagging someone who is not on an FT60.
+TEST(Config, capture_mode_defaulted_flag_tracks_whether_it_was_written) {
+  FakeEeprom e;
+  Settings s(e);
+  CHECK(s.captureModeWasDefaulted());
+  s.setCaptureMode(CAPTURE_PIN_INTERRUPT);
+  CHECK(!s.captureModeWasDefaulted());
+  s.setCaptureMode(CAPTURE_TIMER_POLL);
+  CHECK(!s.captureModeWasDefaulted());
 }
 
 TEST(Config, erased_eeprom_is_reported_as_defaulted) {
@@ -245,14 +369,20 @@ TEST(Config, fields_do_not_overlap) {
   s.setFlowPin(30);
   s.setMetric(true);
   s.setK(MAX_K);
-  s.setCaptureMode(CAPTURE_PIN_INTERRUPT);
+  s.setCaptureMode(CAPTURE_TIMER_POLL);
+  s.setPulseGuardUnits(MAX_PULSE_GUARD_UNITS);
+  s.setKAcknowledged();
 
   CHECK_NEAR(s.fuelUsedGallons(), 60.0f, 1e-3);
   CHECK_EQ(s.canSpeed(), (uint8_t)18);
   CHECK_EQ(s.flowPin(), (uint8_t)30);
   CHECK(s.metric());
   CHECK_EQ(s.k(), MAX_K);
-  CHECK_EQ(s.captureMode(), CAPTURE_PIN_INTERRUPT);
+  CHECK_EQ(s.captureMode(), CAPTURE_TIMER_POLL);
   CHECK(ADDR_K + 4 <= ADDR_CAPTURE_MODE);
-  CHECK(ADDR_CAPTURE_MODE + 1 <= ADDR_END);
+  CHECK_EQ(s.pulseGuardUnits(), MAX_PULSE_GUARD_UNITS);
+  CHECK(s.kAcknowledged());
+  CHECK(ADDR_CAPTURE_MODE + 1 <= ADDR_PULSE_GUARD);
+  CHECK(ADDR_PULSE_GUARD + 1 <= ADDR_K_ACKED);
+  CHECK(ADDR_K_ACKED + 1 <= ADDR_END);
 }

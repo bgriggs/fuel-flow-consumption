@@ -78,6 +78,21 @@ void setup() {
     Serial.print(F("Stored K invalid, using default="));
     Serial.println(settings.k());
   }
+  // First boot after the upgrade: the capture byte has never been written, so
+  // the device has just adopted the new interrupt default. Persist it, so a
+  // later firmware changing the default - or a downgrade - cannot silently
+  // move the device back to polling with a K meant for interrupt capture.
+  //
+  // What gets written is the resolved setting, never activeCaptureMode().
+  // If the configured pin has no external interrupt the device is polling
+  // right now, but that is a fact about this boot, not a preference; freezing
+  // it would leave the unit polling for good once the pin was corrected, with
+  // nothing left to say the upgrade had ever happened.
+  if (settings.captureModeWasDefaulted()) {
+    settings.setCaptureMode(settings.captureMode());
+    Serial.print(F("Pulse capture defaulted to "));
+    Serial.println(settings.captureMode());
+  }
 
   Serial.print(F("CAN Speed="));
   Serial.println(speed);

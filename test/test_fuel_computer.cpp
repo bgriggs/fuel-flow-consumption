@@ -294,3 +294,145 @@ TEST(FuelComputer, long_run_stays_stable) {
   CHECK_NEAR(s.fuelConsumptionGalMin, 1.0f, 1e-3);
   CHECK(s.fuelRemainingGals >= 0.0f);
 }
+
+// ---------------------------------------------------------------------------
+// Peak pulse rate
+//
+// A diagnostic for the capture method: polling the input from the 1 kHz timer
+// cannot resolve a pulse train faster than ~488 Hz, so knowing the real peak
+// tells you whether the polled counter is losing pulses.
+// ---------------------------------------------------------------------------
+
+TEST(FuelComputer, peak_rate_starts_at_zero) {
+  FuelComputer fc(K);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)0);
+  fc.update(0, 0, 20.0f);  // first sample has nothing to compare against
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)0);
+}
+
+TEST(FuelComputer, measures_a_steady_pulse_rate) {
+  FuelComputer fc(K);
+  // 1000 pulses per 1000 ms sample is 1000 pulses/sec.
+  runSteadyFlow(fc, 10, 1000, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)1000);
+}
+
+TEST(FuelComputer, peak_holds_the_highest_rate_not_the_latest) {
+  FuelComputer fc(K);
+  uint32_t pulses = 0;
+  uint32_t t = 0;
+  // Slow, then a burst, then slow again.
+  const uint32_t perSample[] = { 200, 200, 1300, 200, 200 };
+  for (uint8_t i = 0; i < 5; i++) {
+    fc.update(t, pulses, 20.0f);
+    pulses += perSample[i];
+    t += FuelComputer::SAMPLE_INTERVAL_MS;
+  }
+  fc.update(t, pulses, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)1300);
+}
+
+// An FT60 at 68000 pulses/gal and 70 GPH runs at about 1322 Hz, well past what
+// the polled counter can resolve. The diagnostic has to report that honestly.
+TEST(FuelComputer, reports_rates_above_the_polling_limit) {
+  FuelComputer fc(K);
+  runSteadyFlow(fc, 5, 1322, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)1322);
+}
+
+// Every other peak test spaces samples exactly one interval apart, which makes
+// the pulse delta and the rate numerically identical and leaves the division
+// unexercised. Use an uneven gap so the two differ.
+TEST(FuelComputer, rate_is_pulses_divided_by_elapsed_time) {
+  FuelComputer fc(K);
+  fc.update(0, 0, 20.0f);
+  // 900 pulses over 1500 ms is 600 Hz, not 900.
+  fc.update(1500, 900, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)600);
+
+  FuelComputer slow(K);
+  slow.update(0, 0, 20.0f);
+  // 900 pulses over 3000 ms is 300 Hz.
+  slow.update(3000, 900, 20.0f);
+  CHECK_EQ(slow.peakPulsesPerSec(), (uint16_t)300);
+}
+
+// A rate beyond what a uint16 can carry has to saturate, not wrap.
+TEST(FuelComputer, rate_saturates_at_the_field_maximum) {
+  FuelComputer fc(K);
+  fc.update(0, 0, 20.0f);
+  fc.update(1000, 90000, 20.0f);  // 90000 Hz, under the delta guard
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)65535);
+}
+
+TEST(FuelComputer, peak_rate_can_be_cleared) {
+  FuelComputer fc(K);
+  runSteadyFlow(fc, 5, 1000, 20.0f);
+  CHECK(fc.peakPulsesPerSec() > 0);
+  fc.clearPeakPulseRate();
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)0);
+}
+
+// A fuel reset zeroes the counter. The resulting backwards step is not a
+// measurement of anything and must not register as a rate.
+TEST(FuelComputer, counter_reset_does_not_register_a_peak) {
+  FuelComputer fc(K);
+  runSteadyFlow(fc, 5, 500, 20.0f);
+  uint16_t before = fc.peakPulsesPerSec();
+  fc.update(5UL * FuelComputer::SAMPLE_INTERVAL_MS, 0, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), before);
+}
+
+// A delta too large for the direct calculation must still be reported, not
+// dropped. With the holdoff switched off a severe noise burst lands here, and
+// exposing that is the whole reason the diagnostic exists.
+TEST(FuelComputer, enormous_delta_saturates_rather_than_vanishing) {
+  FuelComputer fc(K);
+  fc.update(0, 0, 20.0f);
+  fc.update(FuelComputer::SAMPLE_INTERVAL_MS,
+            FuelComputer::MAX_RATE_SAMPLE_PULSES + 1000UL, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)65535);
+}
+
+// The oversized path must still divide by elapsed time rather than assuming a
+// one second interval.
+TEST(FuelComputer, enormous_delta_still_accounts_for_elapsed_time) {
+  FuelComputer fc(K);
+  fc.update(0, 0, 20.0f);
+  // 5,000,000 pulses over 100 s is 50000 Hz: large, but under the uint16 cap.
+  fc.update(100000, 5000000UL, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)50000);
+}
+
+// The counter is seeded from EEPROM at boot, so the very first sample carries
+// a large pulse count at a non-zero timestamp. Without the have-we-sampled
+// guard that reads as a huge rate: 68000 restored pulses at t=3000 ms would
+// latch a bogus 22667 Hz peak.
+TEST(FuelComputer, first_sample_after_boot_does_not_register_a_rate) {
+  FuelComputer fc(K);
+  fc.update(3000, 68000, 20.0f);  // one gallon restored from EEPROM
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)0);
+  // The next interval measures only what was actually burned since.
+  fc.update(3000 + FuelComputer::SAMPLE_INTERVAL_MS, 68000 + 400, 20.0f);
+  CHECK_EQ(fc.peakPulsesPerSec(), (uint16_t)400);
+}
+
+// The peak is an average over a sample interval, so where the pulses fall
+// inside that interval cannot change the answer. That makes the figure
+// deliberately conservative: it under-reports short transients.
+TEST(FuelComputer, peak_does_not_depend_on_distribution_within_an_interval) {
+  FuelComputer even(K);
+  even.update(0, 0, 20.0f);
+  even.update(FuelComputer::SAMPLE_INTERVAL_MS, 300, 20.0f);
+
+  FuelComputer uneven(K);
+  uneven.update(0, 0, 20.0f);
+  // Extra calls inside the interval are below the sample gate, so the same
+  // 300 pulses are attributed to the same one second window.
+  uneven.update(FuelComputer::SAMPLE_INTERVAL_MS / 4, 290, 20.0f);
+  uneven.update(FuelComputer::SAMPLE_INTERVAL_MS / 2, 295, 20.0f);
+  uneven.update(FuelComputer::SAMPLE_INTERVAL_MS, 300, 20.0f);
+
+  CHECK_EQ(even.peakPulsesPerSec(), (uint16_t)300);
+  CHECK_EQ(uneven.peakPulsesPerSec(), even.peakPulsesPerSec());
+}

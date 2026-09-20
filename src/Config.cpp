@@ -25,6 +25,22 @@ bool validateMetric(uint8_t raw) {
   return raw != 0 && raw != 0xFF;
 }
 uint32_t validateK(uint32_t raw) { return isValidK(raw) ? raw : DEFAULT_K; }
+bool isNearNominalK(uint32_t k) {
+  uint32_t margin = (DEFAULT_K / 100UL) * K_TOLERANCE_PERCENT;
+  return k >= DEFAULT_K - margin && k <= DEFAULT_K + margin;
+}
+
+bool isValidPulseGuard(uint8_t raw) { return raw <= MAX_PULSE_GUARD_UNITS; }
+uint8_t validatePulseGuard(uint8_t raw) {
+  return isValidPulseGuard(raw) ? raw : DEFAULT_PULSE_GUARD_UNITS;
+}
+
+uint16_t countableRateHz(uint16_t guardUs) {
+  if (guardUs == 0) return 0;  // no holdoff, no ceiling
+  uint32_t hz = 1000000UL / (uint32_t)guardUs;
+  return hz > 65535UL ? (uint16_t)65535 : (uint16_t)hz;
+}
+
 uint8_t validateCaptureMode(uint8_t raw) {
   return isValidCaptureMode(raw) ? raw : DEFAULT_CAPTURE_MODE;
 }
@@ -96,6 +112,31 @@ uint8_t Settings::captureMode() {
 }
 void Settings::setCaptureMode(uint8_t value) {
   store_.update(ADDR_CAPTURE_MODE, validateCaptureMode(value));
+}
+
+// Set once the user has deliberately chosen a K, which is what stops the
+// recalibration advice being offered forever - including to someone who has
+// just followed it, since a correctly recalibrated K often lands outside the
+// FT60 tolerance band.
+bool Settings::kAcknowledged() {
+  return store_.read(ADDR_K_ACKED) == K_ACKED_MAGIC;
+}
+void Settings::setKAcknowledged() {
+  store_.update(ADDR_K_ACKED, K_ACKED_MAGIC);
+}
+
+bool Settings::captureModeWasDefaulted() {
+  return !isValidCaptureMode(store_.read(ADDR_CAPTURE_MODE));
+}
+
+uint8_t Settings::pulseGuardUnits() {
+  return validatePulseGuard(store_.read(ADDR_PULSE_GUARD));
+}
+void Settings::setPulseGuardUnits(uint8_t value) {
+  store_.update(ADDR_PULSE_GUARD, validatePulseGuard(value));
+}
+uint16_t Settings::pulseGuardUs() {
+  return (uint16_t)((uint16_t)pulseGuardUnits() * PULSE_GUARD_UNIT_US);
 }
 
 float Settings::fuelUsedGallons() {

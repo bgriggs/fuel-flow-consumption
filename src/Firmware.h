@@ -66,11 +66,18 @@ uint32_t readFuelPulses();
 // Which counting method actually started, which may differ from the stored
 // setting if the configured pin has no external interrupt.
 uint8_t activeCaptureMode();
+uint16_t activePulseGuardUs();
+
+// Edges discarded by the noise holdoff since boot. A count that rises with
+// the engine off means electrical noise is reaching the input.
+uint32_t readRejectedEdges();
+void clearRejectedEdges();
 
 // --- commands.ino ----------------------------------------------------------
 
 void serviceSerial();
 void handleCommand(const char* line);
 void printSettings();
+void printKAdviceIfNeeded();
 
 #endif  // FIRMWARE_H

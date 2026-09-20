@@ -18,6 +18,8 @@ TEST(CommandParser, recognizes_every_verb) {
   CHECK_EQ(parseCommand("?").id, CMD_HELP);
   CHECK_EQ(parseCommand("getcapture").id, CMD_GET_CAPTURE);
   CHECK_EQ(parseCommand("setcapture 1").id, CMD_SET_CAPTURE);
+  CHECK_EQ(parseCommand("getpulseguard").id, CMD_GET_PULSE_GUARD);
+  CHECK_EQ(parseCommand("setpulseguard 400").id, CMD_SET_PULSE_GUARD);
   CHECK_EQ(parseCommand("debug 1").id, CMD_SET_DEBUG);
 }
 

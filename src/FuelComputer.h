@@ -36,6 +36,13 @@ public:
   static const uint16_t SAMPLE_INTERVAL_MS = 1000;
   static const uint8_t MAX_LAPS = 3;
 
+  // Above this many pulses in one interval, delta * 1000 would overflow a
+  // uint32, so the rate is computed the other way round instead. Nothing is
+  // discarded: a genuinely enormous rate still has to show up in the
+  // diagnostic, which is the whole reason it exists. The holdoff can be
+  // switched off entirely, so this path is reachable.
+  static const uint32_t MAX_RATE_SAMPLE_PULSES = 4000000UL;
+
   // Endurance is meaningless below this burn rate (engine off, or a stalled
   // pulse train) and dividing by it produces absurd figures.
   static const uint16_t MIN_CONSUMPTION_MILLIGAL_MIN = 1;  // 0.001 gal/min
@@ -69,6 +76,18 @@ public:
   // only appended to the window every SAMPLE_INTERVAL_MS.
   FuelStatus update(uint32_t nowMs, uint32_t pulses, float capacityGals);
 
+  // Highest pulse rate seen between two consecutive samples, in pulses per
+  // second, since boot or the last clearPeakPulseRate().
+  //
+  // This is a diagnostic for the pulse capture method rather than a fuel
+  // figure. Polling the input from the 1 kHz timer cannot resolve a train
+  // faster than about 488 Hz, so a peak approaching that means the counter is
+  // losing pulses and the capture mode should be switched to the pin
+  // interrupt. Measured over whole sample intervals, so a single glitch
+  // cannot pin it high.
+  uint16_t peakPulsesPerSec() const { return peakPulsesPerSec_; }
+  void clearPeakPulseRate() { peakPulsesPerSec_ = 0; }
+
   // Exposed for tests.
   uint8_t sampleCount() const { return sampleCount_; }
   uint8_t lapCount() const { return lapCount_; }
@@ -85,6 +104,7 @@ private:
   uint8_t sampleCount_;  // number of valid samples, saturating at HISTORY_SAMPLES
   uint32_t lastSampleMs_;
   bool haveSampled_;
+  uint16_t peakPulsesPerSec_;
 
   uint32_t lapMs_[MAX_LAPS];
   uint8_t lapHead_;
