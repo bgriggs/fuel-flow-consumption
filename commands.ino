@@ -136,6 +136,24 @@ void printSettings() {
     Serial.println(F("Polling counts to 488 Hz = 25.9 GPH at K=68000"));
   }
 
+  // Reset accounting has nothing to do with pulse capture, and a unit running
+  // in poll mode is the one most likely to be under diagnosis, so these are
+  // reported either way.
+  Serial.print(F("CanReset="));
+  Serial.print(canResetEnabled ? 1 : 0);
+  Serial.print(F(", ignored bus reset frames="));
+  Serial.println(ignoredCanResetFrameCount());
+
+  Serial.print(F("LastReset="));
+  Serial.print(settings.lastResetReason());
+  Serial.print(F(" (0=none 1=bus 2=refuel 3=console), lifetime="));
+  Serial.println(settings.resetCount());
+
+  Serial.print(F("RefuelArmed="));
+  Serial.print(autoResetDetector.isArmed() ? 1 : 0);
+  if (autoResetDetector.isArming()) Serial.print(F(" (low period running)"));
+  Serial.println(F(" (tank-full line must be held low, then rise)"));
+
   Serial.print(F("PeakPulseRate="));
   Serial.print(fuelComputer.peakPulsesPerSec());
   Serial.print(F(" Hz = "));
@@ -182,6 +200,8 @@ static void printHelp() {
   Serial.println(F("  setcapture 0|1    1=pin interrupt (default), 0=poll"));
   Serial.println(F("  getpulseguard"));
   Serial.println(F("  setpulseguard us  noise holdoff, 0-2000 (default 400)"));
+  Serial.println(F("  getcanreset"));
+  Serial.println(F("  setcanreset 0|1   honor the bus reset command"));
   Serial.println(F("  debug 0|1         log every received CAN frame"));
   Serial.println(F("  reset             zero the fuel used"));
 }
@@ -295,6 +315,29 @@ void handleCommand(const char* line) {
         Serial.println(F("488 Hz, which is only 25.9 GPH at K=68000."));
       }
       printRestartNotice();
+      break;
+
+    case fuel::CMD_GET_CAN_RESET:
+      Serial.print(F("CanReset="));
+      Serial.println(canResetEnabled ? 1 : 0);
+      break;
+
+    case fuel::CMD_SET_CAN_RESET:
+      if (!cmd.argValid || cmd.arg < 0 || cmd.arg > 1) {
+        reportInvalidArg(F("CAN reset flag (expected 0 or 1)"));
+        break;
+      }
+      settings.setCanResetEnabled(cmd.arg != 0);
+      // Applied at once rather than on the next boot. This is the one setting
+      // whose whole purpose is to stop something that is happening now, and
+      // re-reading the byte costs microseconds and no EEPROM wear.
+      canResetEnabled = settings.canResetEnabled();
+      Serial.print(F("CanReset="));
+      Serial.println(canResetEnabled ? 1 : 0);
+      if (!canResetEnabled) {
+        Serial.println(F("Bus reset commands now ignored. Console 'reset'"));
+        Serial.println(F("still works, and auto-reset is unaffected."));
+      }
       break;
 
     case fuel::CMD_GET_PULSE_GUARD:

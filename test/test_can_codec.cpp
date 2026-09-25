@@ -32,7 +32,7 @@ TEST(CanCodec, short_state_frame_cannot_request_a_reset) {
   CHECK(!r.resetRequested);
 }
 
-TEST(CanCodec, reset_is_only_honoured_when_its_byte_was_received) {
+TEST(CanCodec, reset_is_only_honored_when_its_byte_was_received) {
   Parameters p;
   uint8_t buf[8] = { 0, 0, 0, 0, 0, 1, 0, 0 };
   for (uint8_t len = 0; len < 6; len++) {
@@ -291,4 +291,168 @@ TEST(CanCodec, byte_order_helpers_are_big_endian) {
   CHECK_EQ(buf[0], (uint8_t)0x01);
   CHECK_EQ(buf[3], (uint8_t)0x04);
   CHECK_EQ(readU32(buf), 0x01020304UL);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics, carried in the unused bytes of 0x100B0005
+// ---------------------------------------------------------------------------
+
+// Those bytes were always zero before, so anything already decoding the frame
+// must be unaffected when there is nothing to report.
+TEST(CanCodec, diagnostics_are_absent_when_nothing_is_set) {
+  FuelStatus s;
+  s.fuelConsumptionGalLap = 0.41f;
+  TxFrames f;
+  encodeStatus(s, false, f);
+  CHECK_EQ(readU16(&f.metricLap[0]), (uint16_t)15520);
+  for (uint8_t i = 2; i < 8; i++) CHECK_EQ(f.metricLap[i], (uint8_t)0);
+}
+
+TEST(CanCodec, diagnostics_do_not_disturb_the_liters_per_lap_value) {
+  FuelStatus s;
+  s.fuelConsumptionGalLap = 0.41f;
+  Diagnostics d;
+  d.refuelArmed = true;
+  d.resetCount = 7;
+  d.uptimeMs = 123456;
+  TxFrames f;
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(readU16(&f.metricLap[0]), (uint16_t)15520);
+}
+
+TEST(CanCodec, encodes_each_diagnostic_flag_independently) {
+  Diagnostics d;
+  CHECK_EQ(encodeDiagFlags(d), (uint8_t)0);
+
+  d = Diagnostics();
+  d.refuelArmed = true;
+  CHECK_EQ(encodeDiagFlags(d), DIAG_REFUEL_ARMED);
+
+  d = Diagnostics();
+  d.refuelDwelling = true;
+  CHECK_EQ(encodeDiagFlags(d), DIAG_REFUEL_DWELLING);
+
+  d = Diagnostics();
+  d.interruptCapture = true;
+  CHECK_EQ(encodeDiagFlags(d), DIAG_INTERRUPT_CAPTURE);
+
+  d = Diagnostics();
+  d.stateFresh = true;
+  CHECK_EQ(encodeDiagFlags(d), DIAG_STATE_FRESH);
+
+  d = Diagnostics();
+  d.canError = true;
+  CHECK_EQ(encodeDiagFlags(d), DIAG_CAN_ERROR);
+
+  // All at once, so no two share a bit.
+  d = Diagnostics();
+  d.refuelArmed = d.refuelDwelling = d.interruptCapture = true;
+  d.stateFresh = d.canError = true;
+  CHECK_EQ(encodeDiagFlags(d), (uint8_t)0x1F);
+}
+
+TEST(CanCodec, encodes_reset_count_and_reason) {
+  FuelStatus s;
+  Diagnostics d;
+  d.resetCount = 3;
+  d.lastResetReason = RESET_REFUEL;
+  TxFrames f;
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(f.metricLap[3], (uint8_t)3);
+  CHECK_EQ(f.metricLap[4], RESET_REFUEL);
+}
+
+// The reason a counter dropped cannot be told from a reboot without this.
+TEST(CanCodec, encodes_uptime_in_seconds) {
+  FuelStatus s;
+  Diagnostics d;
+  TxFrames f;
+
+  d.uptimeMs = 0;
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(readU16(&f.metricLap[5]), (uint16_t)0);
+
+  d.uptimeMs = 45678;                    // 45.678 s
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(readU16(&f.metricLap[5]), (uint16_t)45);
+
+  d.uptimeMs = 3600000UL;                // one hour
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(readU16(&f.metricLap[5]), (uint16_t)3600);
+}
+
+TEST(CanCodec, uptime_saturates_rather_than_wrapping) {
+  FuelStatus s;
+  Diagnostics d;
+  TxFrames f;
+  d.uptimeMs = 65535000UL;               // exactly the ceiling
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(readU16(&f.metricLap[5]), (uint16_t)65535);
+  d.uptimeMs = 4294000000UL;             // near the millis() rollover
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(readU16(&f.metricLap[5]), (uint16_t)65535);
+}
+
+// Exact while small, because the question is usually "any noise at all?".
+TEST(CanCodec, rejected_edges_are_exact_then_pinned) {
+  FuelStatus s;
+  Diagnostics d;
+  TxFrames f;
+
+  d.rejectedEdges = 0;
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(f.metricLap[7], (uint8_t)0);
+
+  d.rejectedEdges = 17;
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(f.metricLap[7], (uint8_t)17);
+
+  d.rejectedEdges = 255;
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(f.metricLap[7], (uint8_t)255);
+
+  d.rejectedEdges = 1000000UL;
+  encodeStatus(s, false, d, f);
+  CHECK_EQ(f.metricLap[7], (uint8_t)255);
+}
+
+// A reboot and a reset must look different in a log.
+TEST(CanCodec, a_reboot_is_distinguishable_from_a_reset) {
+  FuelStatus s;
+  TxFrames before, after;
+
+  Diagnostics running;
+  running.uptimeMs = 1800000UL;          // half an hour in
+  running.resetCount = 0;
+  encodeStatus(s, false, running, before);
+
+  Diagnostics rebooted;                  // uptime back to nearly zero
+  rebooted.uptimeMs = 800;
+  rebooted.resetCount = 0;
+  encodeStatus(s, false, rebooted, after);
+
+  CHECK(readU16(&before.metricLap[5]) > readU16(&after.metricLap[5]));
+  // A reset instead leaves uptime climbing and bumps the count.
+  Diagnostics reset;
+  reset.uptimeMs = 1800500UL;
+  reset.resetCount = 1;
+  reset.lastResetReason = RESET_REFUEL;
+  TxFrames afterReset;
+  encodeStatus(s, false, reset, afterReset);
+  CHECK(readU16(&afterReset.metricLap[5]) >= readU16(&before.metricLap[5]));
+  CHECK(afterReset.metricLap[3] > before.metricLap[3]);
+}
+
+// A reset command that was received and deliberately ignored has to be
+// visible in a log, so a counter that did NOT reset can be explained too.
+TEST(CanCodec, encodes_the_ignored_can_reset_flag) {
+  Diagnostics d;
+  CHECK_EQ(encodeDiagFlags(d) & DIAG_CAN_RESET_IGNORED, (uint8_t)0);
+  d.canResetIgnored = true;
+  CHECK_EQ(encodeDiagFlags(d) & DIAG_CAN_RESET_IGNORED, DIAG_CAN_RESET_IGNORED);
+  // ...and it does not collide with any other flag.
+  Diagnostics all;
+  all.refuelArmed = all.refuelDwelling = all.interruptCapture = true;
+  all.stateFresh = all.canError = all.canResetIgnored = true;
+  CHECK_EQ(encodeDiagFlags(all), (uint8_t)0x3F);
 }

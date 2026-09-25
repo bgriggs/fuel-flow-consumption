@@ -22,8 +22,36 @@ struct Device {
   uint32_t pulses;
   uint32_t resets;
   FuelStatus status;
+  // Mirrors the .ino: a reset asked for over the bus is only acted on when
+  // this is set, and ignored frames are counted instead.
+  bool canResetEnabled;
+  uint32_t ignoredCanResetFrames;
+  uint8_t lastResetReason;
 
-  Device() : computer(K), pulses(0), resets(0) {}
+  Device()
+    : computer(K), pulses(0), resets(0), canResetEnabled(true),
+      ignoredCanResetFrames(0), lastResetReason(RESET_NONE) {}
+
+  // The commanded-reset branch of loop(), without the 1 s debounce.
+  void applyBusReset(bool requested) {
+    if (!requested) return;
+    if (canResetEnabled) {
+      doReset(RESET_COMMANDED);
+    } else {
+      ignoredCanResetFrames++;
+    }
+  }
+
+  // The console 'reset' command, which the bus setting must never gate.
+  void consoleReset() { doReset(RESET_CONSOLE); }
+
+  void doReset(uint8_t reason) {
+    pulses = 0;
+    computer.reset();
+    refuelDetector.disarm();
+    resets++;
+    lastResetReason = reason;
+  }
 
   // One pass of the 500 ms status branch of loop().
   void tick(uint32_t nowMs) {
@@ -33,10 +61,9 @@ struct Device {
     if (params.autoReset) {
       if (refuelDetector.update(nowMs, params.fuelFull, status.fuelUsedGals,
                                 params.speedMph)) {
-        pulses = 0;
-        computer.reset();
-        refuelDetector.rearm();
-        resets++;
+        // resetFuel() in the firmware disarms; rearm() here would let the
+        // harness pass while production diverged.
+        doReset(RESET_REFUEL);
         status = computer.update(nowMs, pulses, params.capacityGals);
       }
     } else {
@@ -178,6 +205,11 @@ TEST(Session, splash_stop_shorter_than_the_dwell_does_not_reset) {
 TEST(Session, stuck_full_sender_survives_a_session_of_brief_stops) {
   Device d;
   sendSetup(d, 20.0f, 90000, true);
+  // Arm it first, so this tests the continuous speed gating rather than
+  // stopping at the arming guard.
+  d.refuelDetector.setArmDwellMs(0);
+  sendState(d, 85.0f, 12.0f, false, false);
+  d.tick(0);
 
   for (uint32_t t = 0; t < 1800000UL; t += STATUS_PERIOD_MS) {
     // Stationary for a single 500 ms sample every two minutes.
@@ -209,6 +241,88 @@ TEST(Session, slow_lap_through_the_pits_does_not_reset) {
     d.tick(base + t);
   }
   CHECK_EQ(d.resets, 0u);
+}
+
+// The failure seen on the car. The tank-full line is a level indication that
+// reads asserted over a wide range of tank contents, so it was high on every
+// frame of a real capture. Burn most of a tank, pit in, and sit there: the
+// counter must survive, because nothing was actually refueled.
+TEST(Session, always_high_tank_full_line_survives_a_long_pit_stop) {
+  Device d;
+  sendSetup(d, 18.8f, 90000, true);
+
+  // A stint with the line asserted throughout, as observed.
+  for (uint32_t t = 0; t < 900000UL; t += STATUS_PERIOD_MS) {
+    sendState(d, 85.0f, 0.0f, true, false);
+    d.burnFor(STATUS_PERIOD_MS, 0.6f);
+    d.tick(t);
+  }
+  CHECK(d.status.fuelUsedGals > 4.0f);
+  CHECK_EQ(d.resets, 0u);
+
+  // Pull in and stop for five minutes, exactly where it used to zero itself.
+  uint32_t base = 900000UL;
+  for (uint32_t t = 0; t < 300000UL; t += STATUS_PERIOD_MS) {
+    sendState(d, 0.0f, 0.0f, true, false);
+    d.tick(base + t);
+  }
+  CHECK_EQ(d.resets, 0u);
+  CHECK(d.status.fuelUsedGals > 4.0f);
+}
+
+// ...but a tank that actually runs down and is then filled still works.
+TEST(Session, refuel_after_the_line_drops_is_still_detected) {
+  Device d;
+  sendSetup(d, 18.8f, 90000, true);
+
+  uint32_t t = 0;
+  for (; t < 600000UL; t += STATUS_PERIOD_MS) {   // full, on track
+    sendState(d, 85.0f, 0.0f, true, false);
+    d.burnFor(STATUS_PERIOD_MS, 0.8f);
+    d.tick(t);
+  }
+  for (; t < 1200000UL; t += STATUS_PERIOD_MS) {  // level below the switch
+    sendState(d, 85.0f, 0.0f, false, false);
+    d.burnFor(STATUS_PERIOD_MS, 0.8f);
+    d.tick(t);
+  }
+  CHECK_EQ(d.resets, 0u);
+
+  for (; t < 1230000UL; t += STATUS_PERIOD_MS) {  // stopped, not yet fueled
+    sendState(d, 0.0f, 0.0f, false, false);
+    d.tick(t);
+  }
+  CHECK_EQ(d.resets, 0u);
+
+  for (; t < 1290000UL; t += STATUS_PERIOD_MS) {  // fuel goes in
+    sendState(d, 0.0f, 0.0f, true, false);
+    d.tick(t);
+  }
+  CHECK_EQ(d.resets, 1u);
+  CHECK_NEAR(d.status.fuelUsedGals, 0.0f, 0.01);
+}
+
+// A splash-and-go after a couple of laps: the tank-full line does transition,
+// and the car is stopped, but too little has been burned for this to be a
+// stint refuel.
+TEST(Session, refuel_after_only_a_little_fuel_burned_does_not_reset) {
+  Device d;
+  sendSetup(d, 18.8f, 90000, true);
+
+  uint32_t t = 0;
+  for (; t < 180000UL; t += STATUS_PERIOD_MS) {   // ~2 laps, line low
+    sendState(d, 85.0f, 0.0f, false, false);
+    d.burnFor(STATUS_PERIOD_MS, 0.6f);
+    d.tick(t);
+  }
+  CHECK(d.status.fuelUsedGals < 4.0f);
+
+  for (; t < 300000UL; t += STATUS_PERIOD_MS) {   // stopped, line asserted
+    sendState(d, 0.0f, 0.0f, true, false);
+    d.tick(t);
+  }
+  CHECK_EQ(d.resets, 0u);
+  CHECK(d.status.fuelUsedGals > 1.0f);
 }
 
 // Auto-reset switched off means the tank-full signal is ignored entirely.
@@ -271,4 +385,109 @@ TEST(Session, survives_millis_rollover_mid_stint) {
   CHECK_EQ(d.resets, 0u);
   CHECK(d.status.fuelConsumptionGalMin > 0.4f);
   CHECK(d.status.fuelConsumptionGalMin < 0.6f);
+}
+
+// ---------------------------------------------------------------------------
+// Resets commanded over the bus
+//
+// A live capture caught the dash commanding a reset on a momentary blip of
+// the tank-full switch, which wiped the counter mid-session. setcanreset 0
+// makes the device ignore the command.
+// ---------------------------------------------------------------------------
+
+TEST(Session, a_bus_reset_is_acted_on_when_enabled) {
+  Device d;
+  d.canResetEnabled = true;
+  sendSetup(d, 18.8f, 90000, false);
+  for (uint32_t t = 0; t < 300000UL; t += STATUS_PERIOD_MS) {
+    sendState(d, 85.0f, 0.0f, false, false);
+    d.burnFor(STATUS_PERIOD_MS, 1.0f);
+    d.tick(t);
+  }
+  CHECK(d.status.fuelUsedGals > 4.0f);
+
+  d.applyBusReset(sendState(d, 0.0f, 0.0f, false, true));
+  CHECK_EQ(d.resets, 1u);
+  CHECK_EQ(d.lastResetReason, RESET_COMMANDED);
+  CHECK_EQ(d.ignoredCanResetFrames, 0u);
+}
+
+TEST(Session, a_bus_reset_is_ignored_and_counted_when_disabled) {
+  Device d;
+  d.canResetEnabled = false;
+  sendSetup(d, 18.8f, 90000, false);
+  for (uint32_t t = 0; t < 300000UL; t += STATUS_PERIOD_MS) {
+    sendState(d, 85.0f, 0.0f, false, false);
+    d.burnFor(STATUS_PERIOD_MS, 1.0f);
+    d.tick(t);
+  }
+  float before = d.status.fuelUsedGals;
+  CHECK(before > 4.0f);
+
+  // A dash holding the byte set adds one per frame.
+  for (uint8_t i = 0; i < 5; i++) {
+    d.applyBusReset(sendState(d, 0.0f, 0.0f, false, true));
+  }
+  CHECK_EQ(d.resets, 0u);
+  CHECK_EQ(d.ignoredCanResetFrames, 5u);
+  d.tick(300000UL);
+  CHECK_NEAR(d.status.fuelUsedGals, before, 0.01);
+}
+
+// Disabling the bus command must not take away the manual override.
+TEST(Session, the_console_reset_still_works_when_the_bus_command_is_off) {
+  Device d;
+  d.canResetEnabled = false;
+  sendSetup(d, 18.8f, 90000, false);
+  for (uint32_t t = 0; t < 300000UL; t += STATUS_PERIOD_MS) {
+    sendState(d, 85.0f, 0.0f, false, false);
+    d.burnFor(STATUS_PERIOD_MS, 1.0f);
+    d.tick(t);
+  }
+  CHECK(d.status.fuelUsedGals > 4.0f);
+
+  d.consoleReset();
+  CHECK_EQ(d.resets, 1u);
+  CHECK_EQ(d.lastResetReason, RESET_CONSOLE);
+  d.tick(300000UL);
+  CHECK_NEAR(d.status.fuelUsedGals, 0.0f, 0.01);
+}
+
+// ...and must not take away refuel detection either.
+TEST(Session, refuel_detection_still_works_when_the_bus_command_is_off) {
+  Device d;
+  d.canResetEnabled = false;
+  sendSetup(d, 18.8f, 90000, true);
+
+  uint32_t t = 0;
+  for (; t < 600000UL; t += STATUS_PERIOD_MS) {   // level below the switch
+    sendState(d, 85.0f, 0.0f, false, false);
+    d.burnFor(STATUS_PERIOD_MS, 0.8f);
+    d.tick(t);
+  }
+  for (; t < 660000UL; t += STATUS_PERIOD_MS) {   // stopped, tank filled
+    sendState(d, 0.0f, 0.0f, true, false);
+    d.tick(t);
+  }
+  CHECK_EQ(d.resets, 1u);
+  CHECK_EQ(d.lastResetReason, RESET_REFUEL);
+  CHECK_EQ(d.ignoredCanResetFrames, 0u);
+}
+
+// The three routes have to stay distinguishable, which is the whole point of
+// recording a reason.
+TEST(Session, each_reset_route_records_its_own_reason) {
+  Device d;
+  sendSetup(d, 18.8f, 90000, false);
+  for (uint32_t t = 0; t < 300000UL; t += STATUS_PERIOD_MS) {
+    sendState(d, 85.0f, 0.0f, false, false);
+    d.burnFor(STATUS_PERIOD_MS, 1.0f);
+    d.tick(t);
+  }
+
+  d.applyBusReset(sendState(d, 0.0f, 0.0f, false, true));
+  CHECK_EQ(d.lastResetReason, RESET_COMMANDED);
+  d.consoleReset();
+  CHECK_EQ(d.lastResetReason, RESET_CONSOLE);
+  CHECK_EQ(d.resets, 2u);
 }

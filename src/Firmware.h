@@ -32,9 +32,15 @@ extern fuel::FaultMonitor canFaultMonitor;
 // Cached at boot so the hot path never re-reads EEPROM.
 extern bool metricUnits;
 
-// Per-frame receive logging. Off by default: at 115200 baud a ~90 character
-// line per received frame can take longer to shift out than the interval
-// between frames, and Serial.print() blocks once the transmit buffer fills.
+// Whether a reset commanded over the bus is acted on. Cached at boot.
+extern bool canResetEnabled;
+uint16_t ignoredCanResetFrameCount();
+
+// Per-frame receive logging. Off by default. Serial here is USB CDC rather
+// than a UART, so the configured baud is ignored and throughput far exceeds
+// any CAN rate; the exposure is that a host which has the port open but has
+// stopped draining it blocks Serial.print(), and a line per frame makes that
+// far more likely than the twice-a-second status line alone.
 extern bool debugCanFrames;
 
 // --- fuel-usage.ino --------------------------------------------------------
@@ -45,9 +51,11 @@ void serviceCanHealth(uint32_t nowMs);
 bool busIsLive(uint32_t nowMs);
 void recordLapTime();
 void configureCanFilters();
-void transmitFuelData(const fuel::FuelStatus& status);
+void transmitFuelData(const fuel::FuelStatus& status, uint32_t nowMs);
+void noteReset(uint8_t reason);
 void printStatus(const fuel::FuelStatus& status);
-void printCanFrame(unsigned long id, unsigned char len);
+void printCanFrame(unsigned long id, unsigned char len,
+                   const unsigned char* buf, bool resetRequested);
 
 // Asks the main loop to zero the fuel used on its next pass, so the reset
 // happens at a known point rather than partway through a status cycle.

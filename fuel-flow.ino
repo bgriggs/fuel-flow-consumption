@@ -148,8 +148,9 @@ void resetFuel() {
   // a peak or a noise count from three sessions ago keeps being reported.
   fuelComputer.clearPeakPulseRate();
   clearRejectedEdges();
-  // Make the refuel detector earn a fresh dwell, so the tank still reading
-  // full immediately after a reset cannot trigger another one.
-  autoResetDetector.rearm();
+  // Make the refuel detector earn a fresh low-to-high transition on the
+  // tank-full line, so a tank that goes on reading full immediately after a
+  // reset cannot trigger another one.
+  autoResetDetector.disarm();
   settings.setFuelUsedGallons(0.0f);
 }

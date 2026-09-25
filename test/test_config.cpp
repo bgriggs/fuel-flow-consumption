@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "../src/CanCodec.h"
 #include "../src/Config.h"
 
 using namespace fuel;
@@ -385,4 +386,123 @@ TEST(Config, fields_do_not_overlap) {
   CHECK(ADDR_CAPTURE_MODE + 1 <= ADDR_PULSE_GUARD);
   CHECK(ADDR_PULSE_GUARD + 1 <= ADDR_K_ACKED);
   CHECK(ADDR_K_ACKED + 1 <= ADDR_END);
+}
+
+// ---------------------------------------------------------------------------
+// Reset history, so a session can be explained after the fact
+// ---------------------------------------------------------------------------
+
+TEST(Config, erased_eeprom_reports_no_reset_history) {
+  FakeEeprom e;
+  Settings s(e);
+  CHECK_EQ(s.lastResetReason(), RESET_NONE);
+  CHECK_EQ(s.resetCount(), (uint8_t)0);  // 0xFF means never written
+}
+
+TEST(Config, records_the_reason_and_counts_resets) {
+  FakeEeprom e;
+  Settings s(e);
+  s.recordReset(RESET_COMMANDED);
+  CHECK_EQ(s.lastResetReason(), RESET_COMMANDED);
+  CHECK_EQ(s.resetCount(), (uint8_t)1);
+
+  s.recordReset(RESET_REFUEL);
+  CHECK_EQ(s.lastResetReason(), RESET_REFUEL);
+  CHECK_EQ(s.resetCount(), (uint8_t)2);
+}
+
+TEST(Config, an_unknown_stored_reason_reads_as_none) {
+  FakeEeprom e;
+  Settings s(e);
+  e.poke(ADDR_LAST_RESET, 200);
+  CHECK_EQ(s.lastResetReason(), RESET_NONE);
+  e.poke(ADDR_LAST_RESET, 255);
+  CHECK_EQ(s.lastResetReason(), RESET_NONE);
+  // Checked against the raw cell: lastResetReason() sanitizes on read, so
+  // asserting through it cannot tell whether recordReset validates at all.
+  s.recordReset(200);
+  CHECK_EQ(e.read(ADDR_LAST_RESET), (uint8_t)RESET_NONE);
+  CHECK_EQ(s.lastResetReason(), RESET_NONE);
+}
+
+// It must never wrap round to look like a fresh device.
+TEST(Config, reset_count_saturates_below_the_erased_pattern) {
+  FakeEeprom e;
+  Settings s(e);
+  e.poke(ADDR_RESET_COUNT, (uint8_t)(MAX_RESET_COUNT - 1));
+  s.recordReset(RESET_REFUEL);
+  CHECK_EQ(s.resetCount(), MAX_RESET_COUNT);
+  s.recordReset(RESET_REFUEL);
+  CHECK_EQ(s.resetCount(), MAX_RESET_COUNT);
+  CHECK(MAX_RESET_COUNT < 255);
+}
+
+TEST(Config, reset_history_does_not_overlap_other_settings) {
+  FakeEeprom e;
+  Settings s(e);
+  s.setK(68000);
+  s.setKAcknowledged();
+  s.setPulseGuardUnits(40);
+  s.recordReset(RESET_REFUEL);
+
+  CHECK_EQ(s.k(), 68000UL);
+  CHECK(s.kAcknowledged());
+  CHECK_EQ(s.pulseGuardUnits(), (uint8_t)40);
+  CHECK_EQ(s.lastResetReason(), RESET_REFUEL);
+  CHECK_EQ(s.resetCount(), (uint8_t)1);
+  CHECK(ADDR_K_ACKED + 1 <= ADDR_LAST_RESET);
+  CHECK(ADDR_LAST_RESET + 1 <= ADDR_RESET_COUNT);
+  CHECK(ADDR_RESET_COUNT + 1 <= ADDR_END);
+}
+
+// ---------------------------------------------------------------------------
+// Honoring the bus reset command
+// ---------------------------------------------------------------------------
+
+// Enabled by default, because that is how the protocol has always worked; an
+// upgrade must not silently stop obeying a dash that relies on it.
+TEST(Config, can_reset_is_enabled_on_an_erased_eeprom) {
+  FakeEeprom e;
+  Settings s(e);
+  CHECK(s.canResetEnabled());
+}
+
+TEST(Config, can_reset_can_be_turned_off_and_back_on) {
+  FakeEeprom e;
+  Settings s(e);
+  s.setCanResetEnabled(false);
+  CHECK(!s.canResetEnabled());
+  s.setCanResetEnabled(true);
+  CHECK(s.canResetEnabled());
+}
+
+// Only an explicit stored 0 disables it. A corrupt byte must not silently
+// leave the device ignoring reset commands.
+TEST(Config, only_an_explicit_zero_disables_the_can_reset) {
+  CHECK(!validateCanResetEnabled(0));
+  // Pinned independently of DEFAULT_CAN_RESET_ENABLED: if that default is ever
+  // flipped, a stored 1 must still mean enabled.
+  CHECK(validateCanResetEnabled(1));
+  CHECK(validateCanResetEnabled(2));
+  CHECK(validateCanResetEnabled(255));
+
+  FakeEeprom e;
+  Settings s(e);
+  e.poke(ADDR_CAN_RESET, 200);
+  CHECK(s.canResetEnabled());
+  e.poke(ADDR_CAN_RESET, 0);
+  CHECK(!s.canResetEnabled());
+}
+
+TEST(Config, can_reset_flag_has_its_own_byte) {
+  FakeEeprom e;
+  Settings s(e);
+  s.setCanResetEnabled(false);
+  s.recordReset(RESET_COMMANDED);
+  s.setKAcknowledged();
+  CHECK(!s.canResetEnabled());
+  CHECK_EQ(s.lastResetReason(), RESET_COMMANDED);
+  CHECK_EQ(s.resetCount(), (uint8_t)1);
+  CHECK(ADDR_RESET_COUNT + 1 <= ADDR_CAN_RESET);
+  CHECK(ADDR_CAN_RESET + 1 <= ADDR_END);
 }

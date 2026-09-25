@@ -25,7 +25,23 @@ const uint16_t ADDR_K = 5;          // 4 bytes, pulses per gallon, big-endian
 const uint16_t ADDR_CAPTURE_MODE = 9;  // 1 byte, how pulses are counted
 const uint16_t ADDR_PULSE_GUARD = 10;  // 1 byte, noise holdoff in 10 us units
 const uint16_t ADDR_K_ACKED = 11;   // 1 byte, user has chosen a K deliberately
-const uint16_t ADDR_END = 12;       // first free byte
+const uint16_t ADDR_LAST_RESET = 12;   // 1 byte, why the counter was zeroed
+const uint16_t ADDR_RESET_COUNT = 13;  // 1 byte, lifetime resets, saturating
+const uint16_t ADDR_CAN_RESET = 14;    // 1 byte, honor the bus reset command
+const uint16_t ADDR_END = 15;       // first free byte
+
+// Whether a reset commanded over CAN (byte 5 of the state frame) is acted on.
+// Enabled by default, because that is how the protocol has always worked.
+// A dash with its own refuel detection can end up commanding a reset off a
+// slosh blip on the tank-full switch, and turning this off leaves the console
+// 'reset' as the only way to zero the counter by hand.
+const uint8_t DEFAULT_CAN_RESET_ENABLED = 1;
+bool validateCanResetEnabled(uint8_t raw);
+
+// Written only when a reset actually happens, which is rare, so the EEPROM
+// endurance budget is not a concern. Saturates below the erased pattern so
+// 0xFF continues to mean "never written".
+const uint8_t MAX_RESET_COUNT = 254;
 
 // Arbitrary non-erased value, so an unprogrammed 0xFF does not read as "the
 // user has acknowledged K".
@@ -151,6 +167,15 @@ public:
 
   bool kAcknowledged();
   void setKAcknowledged();
+
+  // Survives a power cycle, so a session can be explained afterwards even if
+  // the CAN log was not running.
+  bool canResetEnabled();
+  void setCanResetEnabled(bool value);
+
+  uint8_t lastResetReason();
+  uint8_t resetCount();
+  void recordReset(uint8_t reason);
 
   uint8_t pulseGuardUnits();
   void setPulseGuardUnits(uint8_t value);

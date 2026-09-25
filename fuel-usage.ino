@@ -27,6 +27,7 @@ fuel::FuelComputer fuelComputer;
 fuel::AutoReset autoResetDetector;
 fuel::FaultMonitor canFaultMonitor;
 bool metricUnits = false;
+bool canResetEnabled = true;
 bool debugCanFrames = false;
 
 // --- timing ----------------------------------------------------------------
@@ -52,9 +53,26 @@ static uint32_t lastSaveMs = 0;
 static uint32_t lastResetMs = 0;
 static bool haveReset = false;
 static bool resetRequested = false;
+// Which route asked. Conflating the two would leave a counter found at zero
+// ambiguous between the dash and a crew member with a laptop, which is the
+// exact question this instrumentation exists to answer.
+static bool resetCameFromBus = false;
 static uint32_t lastFrameMs = 0;
 static bool haveFrame = false;
+// Tracked separately from any-frame activity: the refuel detector reads
+// fuelFull and speed, which only the state frame carries. Running it before
+// one has arrived would feed it Parameters' constructed defaults, and since
+// a low fuelFull is now the arming condition rather than an inert value, that
+// could arm the detector off a signal the sender never sent.
+static uint32_t lastStateFrameMs = 0;
+static bool haveStateFrame = false;
 static uint8_t canRecoveryAttempts = 0;
+static uint8_t resetCount = 0;
+// Frames carrying a set reset byte that were ignored. Counts frames rather
+// than distinct commands - a dash holding the byte set adds one per frame -
+// so read it as "is the dash asking?", not as a count of averted resets.
+static uint16_t ignoredCanResetFrames = 0;
+static uint8_t lastResetReason = fuel::RESET_NONE;
 
 // ---------------------------------------------------------------------------
 
@@ -62,6 +80,7 @@ void setup() {
   Serial.begin(115200);
 
   metricUnits = settings.metric();
+  canResetEnabled = settings.canResetEnabled();
   fuelComputer.setK(settings.k());
   startFlowMeter();
 
@@ -124,6 +143,7 @@ void loop() {
     resetRequested = false;
     if (!haveReset || fuel::elapsed(now, lastResetMs) > RESET_DEBOUNCE_MS) {
       resetFuel();
+      noteReset(resetCameFromBus ? fuel::RESET_COMMANDED : fuel::RESET_CONSOLE);
       lastResetMs = now;
       haveReset = true;
       Serial.println(F("Fuel used reset."));
@@ -144,6 +164,7 @@ void loop() {
     if (autoResetDetector.update(now, params.fuelFull, status.fuelUsedGals,
                                  params.speedMph)) {
       resetFuel();
+      noteReset(fuel::RESET_REFUEL);
       lastResetMs = now;
       haveReset = true;
       Serial.println(F("Refuel detected, fuel used reset."));
@@ -163,7 +184,20 @@ void loop() {
   }
 
   printStatus(status);
-  transmitFuelData(status);
+  transmitFuelData(status, now);
+}
+
+// Record why the counter was zeroed, in RAM for the CAN diagnostics and in
+// EEPROM so a session can still be explained afterwards if the bus was not
+// being logged.
+uint16_t ignoredCanResetFrameCount() {
+  return ignoredCanResetFrames;
+}
+
+void noteReset(uint8_t reason) {
+  lastResetReason = reason;
+  if (resetCount < 255) resetCount++;
+  settings.recordReset(reason);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,9 +258,13 @@ void serviceCanHealth(uint32_t nowMs) {
   }
 }
 
-// True while the sender is still talking to us.
+// True while the sender is still supplying the signals the refuel detector
+// reads. Deliberately about state frames alone: capacity frames keep arriving
+// from some dashes even when the state stream has stopped, and stale speed or
+// tank-full readings must not drive a reset.
 bool busIsLive(uint32_t nowMs) {
-  return haveFrame && fuel::elapsed(nowMs, lastFrameMs) <= RX_TIMEOUT_MS;
+  return haveStateFrame &&
+         fuel::elapsed(nowMs, lastStateFrameMs) <= RX_TIMEOUT_MS;
 }
 
 // Drain every queued frame. The old code took at most one frame per pass and
@@ -254,16 +292,46 @@ void serviceCan() {
       haveFrame = true;
       // Traffic is flowing, so whatever went wrong before is over.
       canRecoveryAttempts = 0;
+      if ((uint32_t)id == fuel::CAN_ID_RX_STATE) {
+        lastStateFrameMs = lastFrameMs;
+        haveStateFrame = true;
+      }
     }
-    if (result.resetRequested) resetRequested = true;
+    if (result.resetRequested) {
+      if (canResetEnabled) {
+        resetRequested = true;
+        resetCameFromBus = true;
+      } else if (ignoredCanResetFrames < 65535) {
+        ignoredCanResetFrames++;
+      }
+    }
 
-    if (debugCanFrames && result.accepted) printCanFrame(id, len);
+    if (debugCanFrames && result.accepted) {
+      printCanFrame(id, len, buf, result.resetRequested);
+    }
   }
 }
 
-void transmitFuelData(const fuel::FuelStatus& status) {
+void transmitFuelData(const fuel::FuelStatus& status, uint32_t nowMs) {
+  // State the dash cannot see and cannot infer from what it already sends.
+  fuel::Diagnostics diag;
+  diag.refuelArmed = autoResetDetector.isArmed();
+  diag.refuelDwelling = autoResetDetector.isDwelling();
+  diag.interruptCapture = (activeCaptureMode() == fuel::CAPTURE_PIN_INTERRUPT);
+  diag.stateFresh = busIsLive(nowMs);
+  // The monitor's debounced view, not the raw register: the MCP2515 latches
+  // receive-overflow bits until software clears them, so one transient
+  // overflow would otherwise pin this high for the rest of the power cycle
+  // and read in a log as a live fault.
+  diag.canError = canFaultMonitor.isFaulted();
+  diag.canResetIgnored = (ignoredCanResetFrames > 0);
+  diag.resetCount = resetCount;
+  diag.lastResetReason = lastResetReason;
+  diag.uptimeMs = nowMs;
+  diag.rejectedEdges = readRejectedEdges();
+
   fuel::TxFrames frames;
-  fuel::encodeStatus(status, metricUnits, frames);
+  fuel::encodeStatus(status, metricUnits, diag, frames);
 
   CAN.sendMsgBuf(fuel::CAN_ID_TX_USAGE, CAN_EXTID, fuel::CAN_FRAME_LEN,
                  frames.usage);
@@ -308,11 +376,22 @@ void printStatus(const fuel::FuelStatus& status) {
   Serial.println(status.lapsRemaining);
 }
 
-void printCanFrame(unsigned long id, unsigned char len) {
+void printCanFrame(unsigned long id, unsigned char len,
+                   const unsigned char* buf, bool resetRequested) {
   Serial.print(F("rx id="));
   Serial.print(id, HEX);
   Serial.print(F(",len="));
   Serial.print(len);
+  // Raw payload and the decoded reset request. Without these there is no way
+  // to tell a reset commanded over the bus from one the device decided on,
+  // which is the single most useful thing to know when the counter drops.
+  Serial.print(F(",data="));
+  for (unsigned char i = 0; i < len; i++) {
+    if (buf[i] < 0x10) Serial.print('0');
+    Serial.print(buf[i], HEX);
+  }
+  Serial.print(F(",RESET="));
+  Serial.print(resetRequested ? 1 : 0);
   Serial.print(F(",cap="));
   Serial.print(params.capacityGals);
   Serial.print(F(",lastLapMs="));
@@ -324,10 +403,15 @@ void printCanFrame(unsigned long id, unsigned char len) {
   Serial.print(F(",fuelLevel="));
   Serial.print(params.fuelLevelGals);
   Serial.print(F(",fuelFull="));
-  Serial.println(params.fuelFull);
+  Serial.print(params.fuelFull);
+  // Behavior now depends on this too, so it has to be visible when
+  // diagnosing from a serial capture.
+  Serial.print(F(",armed="));
+  Serial.println(autoResetDetector.isArmed());
 }
 
 // Asks the main loop to reset on its next pass. Called from the console.
 void requestReset() {
   resetRequested = true;
+  resetCameFromBus = false;
 }

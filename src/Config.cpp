@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "CanCodec.h"
 #include "FuelMath.h"
 
 namespace fuel {
@@ -123,6 +124,38 @@ bool Settings::kAcknowledged() {
 }
 void Settings::setKAcknowledged() {
   store_.update(ADDR_K_ACKED, K_ACKED_MAGIC);
+}
+
+// Anything that is not an explicit 0 or 1 - including the erased pattern -
+// falls back to the default rather than being read as off.
+bool validateCanResetEnabled(uint8_t raw) {
+  if (raw == 0) return false;
+  if (raw == 1) return true;
+  return DEFAULT_CAN_RESET_ENABLED != 0;
+}
+
+bool Settings::canResetEnabled() {
+  return validateCanResetEnabled(store_.read(ADDR_CAN_RESET));
+}
+void Settings::setCanResetEnabled(bool value) {
+  store_.update(ADDR_CAN_RESET, value ? 1 : 0);
+}
+
+uint8_t Settings::lastResetReason() {
+  uint8_t raw = store_.read(ADDR_LAST_RESET);
+  return raw <= RESET_REASON_MAX ? raw : RESET_NONE;
+}
+
+uint8_t Settings::resetCount() {
+  uint8_t raw = store_.read(ADDR_RESET_COUNT);
+  return raw > MAX_RESET_COUNT ? 0 : raw;  // 0xFF means never written
+}
+
+void Settings::recordReset(uint8_t reason) {
+  store_.update(ADDR_LAST_RESET,
+                reason <= RESET_REASON_MAX ? reason : RESET_NONE);
+  uint8_t n = resetCount();
+  if (n < MAX_RESET_COUNT) store_.update(ADDR_RESET_COUNT, (uint8_t)(n + 1));
 }
 
 bool Settings::captureModeWasDefaulted() {

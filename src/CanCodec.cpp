@@ -27,7 +27,28 @@ static void zeroFrame(uint8_t* frame) {
   for (uint8_t i = 0; i < CAN_FRAME_LEN; i++) frame[i] = 0;
 }
 
+uint8_t encodeDiagFlags(const Diagnostics& diag) {
+  uint8_t flags = 0;
+  if (diag.refuelArmed) flags |= DIAG_REFUEL_ARMED;
+  if (diag.refuelDwelling) flags |= DIAG_REFUEL_DWELLING;
+  if (diag.interruptCapture) flags |= DIAG_INTERRUPT_CAPTURE;
+  if (diag.stateFresh) flags |= DIAG_STATE_FRESH;
+  if (diag.canError) flags |= DIAG_CAN_ERROR;
+  if (diag.canResetIgnored) flags |= DIAG_CAN_RESET_IGNORED;
+  return flags;
+}
+
+// Kept for the tests that pin the wire format of the fuel fields alone. The
+// firmware always uses the four-argument form: a default Diagnostics encodes
+// "polling capture, state frames stale" as positive facts rather than as
+// unknown, which would be a lie on the bus.
 void encodeStatus(const FuelStatus& status, bool metric, TxFrames& out) {
+  Diagnostics none;
+  encodeStatus(status, metric, none, out);
+}
+
+void encodeStatus(const FuelStatus& status, bool metric,
+                  const Diagnostics& diag, TxFrames& out) {
   zeroFrame(out.usage);
   zeroFrame(out.remaining);
   zeroFrame(out.metricLap);
@@ -49,9 +70,22 @@ void encodeStatus(const FuelStatus& status, bool metric, TxFrames& out) {
            toU16(status.lapsRemaining < 0 ? 0.0f : (float)status.lapsRemaining));
   writeU16(&out.remaining[6], toU16(status.fuelConsumptionGalLap * 10000.0f));
 
-  // 0x100B0005 - always liters per lap, regardless of the configured units.
+  // 0x100B0005 - liters per lap in bytes 0-1, diagnostics in the rest. Those
+  // bytes were previously always zero, so anything already decoding this frame
+  // is unaffected.
   writeU16(&out.metricLap[0],
            toU16(gallonsToLiters(status.fuelConsumptionGalLap) * 10000.0f));
+  out.metricLap[2] = encodeDiagFlags(diag);
+  out.metricLap[3] = diag.resetCount;
+  out.metricLap[4] = diag.lastResetReason;
+  // Seconds, saturating at about 18 hours - far longer than any session.
+  uint32_t uptimeSec = diag.uptimeMs / 1000UL;
+  writeU16(&out.metricLap[5], uptimeSec > 65535UL ? (uint16_t)65535
+                                                  : (uint16_t)uptimeSec);
+  // Exact while small, because the question is usually "any noise at all?",
+  // then pinned once it is clearly a problem.
+  out.metricLap[7] = diag.rejectedEdges > 255UL ? (uint8_t)255
+                                                : (uint8_t)diag.rejectedEdges;
 }
 
 DecodeResult decodeCapacityFrame(const uint8_t* buf, uint8_t len, bool metric,
@@ -88,7 +122,7 @@ DecodeResult decodeStateFrame(const uint8_t* buf, uint8_t len, bool metric,
     params.fuelLevelGals = clampf(level, 0.0f, MAX_PLAUSIBLE_CAPACITY_GALS);
   }
   if (len >= 5) params.fuelFull = (buf[4] != 0);
-  // A reset is only honoured when the byte that carries it was actually
+  // A reset is only honored when the byte that carries it was actually
   // received. Reading buf[5] out of a short frame is what made resets fire at
   // random.
   if (len >= 6) r.resetRequested = (buf[5] != 0);

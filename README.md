@@ -33,6 +33,7 @@ checked; a rejected value is reported and not stored.
 | `getk` / `setk 1000-1000000` | Transducer pulses per gallon (FT60 is around 68000) |
 | `getcapture` / `setcapture 0\|1` | How pulses are counted. 1 = pin interrupt (default), 0 = timer poll |
 | `getpulseguard` / `setpulseguard us` | Noise holdoff, 0-2000 us in steps of 10. Default 400 |
+| `getcanreset` / `setcanreset 0\|1` | Act on a reset commanded over the bus. On by default |
 | `debug 0\|1` | Log every received CAN frame. Off by default |
 | `reset` | Reset the fuel used |
 
@@ -193,21 +194,63 @@ suggests a failed rectifier diode.
 
 ## Refuel detection
 
-When `AutoReset` is set on `0x100B0001`, fuel used is zeroed automatically once
-all three of these have held **continuously for 10 seconds**:
+The tank-full line is a **level indication, not a refuel event**. On a real car
+it reads asserted across a wide range of tank contents - measured high with the
+tank at roughly two thirds - so it is high for most of a session. Treating
+"high" as "just refueled" zeroed the counter at every pit stop.
+
+So a refuel is only called when the line has first been **held low for 10
+seconds** (the tank actually ran down past the switch), and then all three of
+these hold **continuously for a further 10 seconds**:
 
 - the tank-full signal is asserted
 - more than 4 gallons have been used, so a top-up is not mistaken for a stint
 - road speed is below 3 mph
 
-Any of them lapsing restarts the 10 second clock. Requiring all three together
-is what stops fuel sloshing onto the float switch at a stop, or a tank-full
-line stuck asserted combined with one brief stop, from zeroing the counter
-mid-session.
+Any of them lapsing restarts the clock. The low period is debounced for the
+same reason the dwell is: a float switch that dips low for a single sample
+under braking is no more trustworthy than one that dips high, and an
+undebounced latch would let one such sample re-create the fault.
 
-Auto-reset is also held off whenever nothing has been received on the bus for
-5 seconds, so a dash that dies or is unplugged cannot leave a stale tank-full
-reading driving the detector.
+`status` shows `RefuelArmed=` so you can see whether the low period has been
+served, and the `debug 1` frame log carries `armed=` alongside the inputs.
+
+Consequences worth knowing:
+
+- **A tank topped up before the level drops past the switch is not detected.**
+  There is no way to tell that apart from sitting in the pits with a full tank,
+  which is the fault being fixed. Reset manually after a splash-and-go.
+- **A refuel done with the device powered off is not detected**, because the
+  arming state is not persisted. Fuel used is restored from EEPROM, so the dash
+  will read low for the rest of that stint. **Send a `reset` at the start of
+  each session**, or after any refuel with the device off.
+
+Auto-reset is also held off whenever no *state* frame (`0x100B0002`) has been
+received for 5 seconds, so a dash that dies or is unplugged cannot leave a
+stale tank-full reading driving the detector. Capacity frames alone do not
+count - they carry neither speed nor the tank-full signal.
+
+## Commanded resets
+
+Byte 5 of `0x100B0002` asks the device to zero the fuel used. This is acted on
+by default.
+
+A dash with its own refuel detection can command a reset off a momentary blip
+of the tank-full switch - fuel sloshing as the car comes to a stop is enough -
+which zeroes the counter mid-session. `setcanreset 0` makes the device ignore
+the command. The console `reset` still works, and refuel detection is
+unaffected.
+
+With it disabled, `status` reports how many *frames* carrying a set reset byte
+have been ignored since boot - a dash holding the byte set adds one per frame,
+so read it as "is the dash asking?" rather than as a count of averted resets.
+Bit 5 of the diagnostics flags latches once any has been ignored, so the dash
+asking is visible in a log without the console.
+
+The setting takes effect immediately; no restart is needed.
+
+Note that with both this and `AutoReset` enabled there are two independent
+mechanisms that can zero the counter. Picking one is usually simpler.
 
 ## CAN health
 
@@ -222,7 +265,7 @@ anything, so it stays quiet rather than retrying.
 Sends:<br>
 0x100B0003: FuelPulses (0, 4), FuelUsedGal x 100 (4, 2), FuelConsGal/Min x 10000 (6, 2)<br>
 0x100B0004: FuelRemGals (0, 2) x 100, FuelRemSecs (2, 2), FuelLapsRem (4, 2), FuelConsGal/Lap x 10000 (6, 2)<br>
-0x100B0005: FuelConsLiters/Lap x 10000 (0, 2)<br>
+0x100B0005: FuelConsLiters/Lap x 10000 (0, 2), then diagnostics, see below<br>
 
 Receives:<br>
 0x100B0001: FuelCapacity / 100 (0, 2), LastLapMs (2, 4), AutoReset (6, 1)<br>
@@ -231,6 +274,35 @@ Receives:<br>
 In metric mode the volumes on 0x100B0003 and 0x100B0004 are liters, the rate on
 0x100B0003 is cc/sec, and the received capacity, level and speed are liters and
 km/h. 0x100B0005 is always liters per lap.
+
+## Diagnostics
+
+Bytes 2-7 of `0x100B0005` carry state the dash cannot see and cannot infer
+from what it already sends. Those bytes were previously always zero, so
+decoding them is optional and nothing existing is affected.
+
+| Byte | Content |
+| --- | --- |
+| 2 | Flags: bit0 refuel armed, bit1 dwelling, bit2 interrupt capture, bit3 state frames fresh, bit4 CAN controller fault (debounced, not the raw latched register), bit5 a bus reset was ignored |
+| 3 | Resets since boot, saturating at 255 |
+| 4 | Last reset reason: 0 none, 1 commanded over the bus, 2 refuel detected, 3 console |
+| 5-6 | Uptime in seconds, saturating at 65535 |
+| 7 | Rejected pulse edges **since the last reset**, exact to 255 then pinned. Note this differs from byte 3, which is since boot |
+
+Log these and a counter that drops can be attributed without a laptop:
+
+- **fuel used drops and uptime restarts** - the device rebooted and restored a
+  stale value from EEPROM. That is an electrical fault, not the detector.
+  Without uptime this is indistinguishable from a reset.
+- **fuel used drops, reason 2** - the refuel detector fired. The armed and
+  dwelling flags, with the tank-full and speed values the dash already logs,
+  show why.
+- **fuel used drops, reason 1** - the dash commanded it over the bus; reason 3
+  means somebody typed `reset` on the console.
+- **rejected edges climbing** - electrical noise on the transducer line.
+
+The last reason and a lifetime reset count are also kept in EEPROM and shown
+by `status`, so a session can still be explained if the bus was not logged.
 
 Received frames are decoded only as far as the reported length. A field carried
 by a byte that was not received keeps its previous value, so a short frame
